@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.ipynb_checkpoints/
+
+# Streamlit secrets (never commit real credentials)
+.streamlit/secrets.toml
+
+# Local pipeline inputs (large SNAP-preprocessed rasters — never commit these)
+data/raw/
+models/
+
+# Local rasters if you regenerate outputs/rasters yourself (can be large);
+# outputs/reports/ and outputs/vectors/ ARE committed as demo data so the
+# dashboard's home page works immediately after deploy. Delete them from
+# git (git rm -r --cached outputs/reports outputs/vectors) once you're
+# running main.py against your own real data and don't want the demo
+# snapshot tracked anymore.
+outputs/rasters/
+
+# OS/editor
+.DS_Store
+.vscode/

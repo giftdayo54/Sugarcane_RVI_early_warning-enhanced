@@ -1,0 +1,137 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "block_id": "A01",
+        "estate": "Demo Estate",
+        "variety": "NCo376",
+        "crop_type": "ratoon",
+        "date": "2025-08-27",
+        "observed_rvi": 0.6948,
+        "expected_rvi": 0.6644,
+        "difference": 0.030399999999999983,
+        "percent_deviation": 4.575556893437685,
+        "z_score": 1.0030826189750328,
+        "growth_rate": -0.0038999999999999985,
+        "risk_level": "Normal"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              34.7985,
+              -15.8015
+            ],
+            [
+              34.8015,
+              -15.8015
+            ],
+            [
+              34.8015,
+              -15.7985
+            ],
+            [
+              34.7985,
+              -15.7985
+            ],
+            [
+              34.7985,
+              -15.8015
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "block_id": "A02",
+        "estate": "Demo Estate",
+        "variety": "NCo376",
+        "crop_type": "ratoon",
+        "date": "2025-08-27",
+        "observed_rvi": 0.6161,
+        "expected_rvi": 0.6644,
+        "difference": -0.04830000000000001,
+        "percent_deviation": -7.26971703792896,
+        "z_score": -1.5937135031741485,
+        "growth_rate": -0.00974285714285714,
+        "risk_level": "Normal"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              34.8035,
+              -15.8015
+            ],
+            [
+              34.8065,
+              -15.8015
+            ],
+            [
+              34.8065,
+              -15.7985
+            ],
+            [
+              34.8035,
+              -15.7985
+            ],
+            [
+              34.8035,
+              -15.8015
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "block_id": "A12",
+        "estate": "Demo Estate",
+        "variety": "NCo376",
+        "crop_type": "ratoon",
+        "date": "2025-08-27",
+        "observed_rvi": 0.4152,
+        "expected_rvi": 0.6644,
+        "difference": -0.24919999999999998,
+        "percent_deviation": -37.50752558699578,
+        "z_score": -8.222637784492706,
+        "growth_rate": -0.009071428571428572,
+        "risk_level": "High Risk"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              34.8085,
+              -15.8015
+            ],
+            [
+              34.8115,
+              -15.8015
+            ],
+            [
+              34.8115,
+              -15.7985
+            ],
+            [
+              34.8085,
+              -15.7985
+            ],
+            [
+              34.8085,
+              -15.8015
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,113 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "block_id": "A01",
+        "estate": "Demo Estate",
+        "variety": "NCo376",
+        "crop_type": "ratoon"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              34.7985,
+              -15.8015
+            ],
+            [
+              34.8015,
+              -15.8015
+            ],
+            [
+              34.8015,
+              -15.7985
+            ],
+            [
+              34.7985,
+              -15.7985
+            ],
+            [
+              34.7985,
+              -15.8015
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "block_id": "A02",
+        "estate": "Demo Estate",
+        "variety": "NCo376",
+        "crop_type": "ratoon"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              34.8035,
+              -15.8015
+            ],
+            [
+              34.8065,
+              -15.8015
+            ],
+            [
+              34.8065,
+              -15.7985
+            ],
+            [
+              34.8035,
+              -15.7985
+            ],
+            [
+              34.8035,
+              -15.8015
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "block_id": "A12",
+        "estate": "Demo Estate",
+        "variety": "NCo376",
+        "crop_type": "ratoon"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              34.8085,
+              -15.8015
+            ],
+            [
+              34.8115,
+              -15.8015
+            ],
+            [
+              34.8115,
+              -15.7985
+            ],
+            [
+              34.8085,
+              -15.7985
+            ],
+            [
+              34.8085,
+              -15.8015
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+block_id,date,planting_date,variety,crop_type,healthy,observed_rvi,rainfall_mm,irrigation_mm,yield_t_ha,is_problem
+A12,2025-01-12,2024-11-01,NCo376,ratoon,true,0.42,12,30,95,0

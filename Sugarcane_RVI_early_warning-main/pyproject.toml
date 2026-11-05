@@ -1,0 +1,11 @@
+[build-system]
+requires=["setuptools>=68"]
+build-backend="setuptools.build_meta"
+[project]
+name="sugarcane-rvi-early-warning"
+version="1.0.0"
+requires-python=">=3.10"
+[tool.setuptools.packages.find]
+include=["src*"]
+[tool.pytest.ini_options]
+pythonpath=["."]
