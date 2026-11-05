@@ -1,0 +1,22 @@
+# Deployed-dashboard requirements (used by Streamlit Community Cloud).
+# xarray/dask/tensorflow/jupyterlab/ipykernel are NOT imported anywhere in
+# src/, main.py, or dashboard.py — they're only used in the exploratory
+# notebook — so they're left out here to keep cloud builds fast and inside
+# the free tier's memory limits. For local notebook work, keep using
+# `environment.yml`, which still has all of them.
+numpy>=1.26,<3
+pandas>=2.1,<3
+geopandas>=0.14,<2
+rasterio>=1.3,<2
+shapely>=2.0,<3
+pyproj>=3.6,<4
+pyogrio>=0.7,<1
+scipy>=1.11
+scikit-learn>=1.4,<2
+statsmodels>=0.14,<1
+matplotlib>=3.8,<4
+plotly>=5.18,<7
+streamlit>=1.31,<2
+pyyaml>=6,<7
+joblib>=1.3
+sentinelhub>=3.10,<4
