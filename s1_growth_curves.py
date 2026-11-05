@@ -44,6 +44,45 @@ GROWTH_WINDOW_DAYS = 90
 MAX_PROCESS_API_DIM = 2500  # hard Process API limit, pixels per side
 TIME_BUFFER_MINUTES = 5
 
+def cdse_collection(base: DataCollection, config: SHConfig, name: str) -> DataCollection:
+    """Re-define a collection so Process API calls go to the endpoint in ``config``.
+
+    The stock ``DataCollection.SENTINEL1_IW_ASC`` etc. pin services.sentinel-hub.com, and sentinelhub-py lets
+    that override ``config.sh_base_url`` - which sends Copernicus Data Space (CDSE) credentials to the wrong server.
+    """
+    return base.define_from(name, service_url=config.sh_base_url.rstrip("/"))
+
+
+def download_tolerant(download_requests: list, config: SHConfig, max_threads: int = 4, max_leading_failures: int = 3) -> list:
+    """Download Process API requests; a failed request yields ``None`` instead of aborting the batch.
+
+    Current sentinelhub-py has no ``raise_download_errors`` switch and raises on the first failure, so on a batch
+    failure each request is retried on its own. If the first ``max_leading_failures`` all fail (bad credentials,
+    wrong endpoint, quota...) it stops and raises that error rather than hammering the service.
+    """
+    client = SentinelHubDownloadClient(config=config)
+    try:
+        return client.download(download_requests, max_threads=max_threads, show_progress=False)
+    except Exception as batch_exc:
+        if len(download_requests) <= 1:
+            raise
+        logger.warning("Batch download failed (%s); retrying requests individually.", batch_exc)
+    results, first_error, leading_fail = [], None, 0
+    for req in download_requests:
+        try:
+            results.append(client.download([req], max_threads=1, show_progress=False)[0])
+            leading_fail = -10**9  # at least one success: never trigger the fail-fast rule
+        except Exception as exc:
+            first_error = first_error or exc
+            results.append(None)
+            leading_fail += 1
+            if leading_fail >= max_leading_failures:
+                raise first_error
+    if all(r is None for r in results) and first_error is not None:
+        raise first_error
+    return results
+
+
 EVALSCRIPT_S1 = """
 //VERSION=3
 function setup() {
@@ -236,7 +275,7 @@ def build_process_requests(fields_gdf: gpd.GeoDataFrame, field_acqs: dict, confi
                 evalscript=EVALSCRIPT_S1,
                 input_data=[
                     SentinelHubRequest.input_data(
-                        data_collection=DataCollection.SENTINEL1_IW_ASC,
+                        data_collection=cdse_collection(DataCollection.SENTINEL1_IW_ASC, config, "s1_asc_user_endpoint"),
                         time_interval=(t_from, t_to),
                         other_args={"processing": {"backCoeff": "SIGMA0_ELLIPSOID", "orthorectify": True}},
                     )
@@ -285,9 +324,8 @@ def extract_timeseries(
         progress_callback(len(requests_info))
 
     download_requests = [info["request"].download_list[0] for info in requests_info]
-    client = SentinelHubDownloadClient(config=config)
     try:
-        arrays = client.download(download_requests, max_threads=max_threads, show_progress=False, raise_download_errors=False)
+        arrays = download_tolerant(download_requests, config, max_threads=max_threads)
     except Exception as exc:
         raise RuntimeError(f"failed downloading Process API responses from Sentinel Hub: {exc}") from exc
 

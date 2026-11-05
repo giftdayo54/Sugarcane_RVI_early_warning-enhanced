@@ -33,12 +33,10 @@ from rasterio.transform import Affine, from_bounds
 from scipy import ndimage as ndi
 from shapely.geometry import shape as shapely_shape
 
-from sentinelhub import (
-    BBox, CRS, DataCollection, Geometry, MimeType, SentinelHubCatalog,
-    SentinelHubDownloadClient, SentinelHubRequest, SHConfig,
-)
+from sentinelhub import BBox, CRS, DataCollection, Geometry, MimeType, SentinelHubCatalog, SentinelHubRequest, SHConfig
 
 from .raster_calc import S2_BANDS
+from .s1_growth_curves import cdse_collection, download_tolerant
 
 logger = logging.getLogger("imagery")
 
@@ -132,11 +130,6 @@ class Scene:
 # --------------------------------------------------------------------------
 # Collections / grid / masks
 # --------------------------------------------------------------------------
-
-def cdse_collection(base: DataCollection, config: SHConfig, name: str) -> DataCollection:
-    """Re-define a collection so requests go to the endpoint in ``config`` (CDSE or commercial)."""
-    return base.define_from(name, service_url=config.sh_base_url.rstrip("/"))
-
 
 def s2_collection(config: SHConfig) -> DataCollection:
     return cdse_collection(DataCollection.SENTINEL2_L2A, config, "s2_l2a_user_endpoint")
@@ -282,10 +275,9 @@ def search_s1_scenes(geom_wgs84, start: str, end: str, config: SHConfig, directi
 # --------------------------------------------------------------------------
 
 def _download(requests: list[SentinelHubRequest], config: SHConfig, max_threads: int = 4) -> list:
-    client = SentinelHubDownloadClient(config=config)
-    dl = [r.download_list[0] for r in requests]
+    """Run Process API requests; failed ones come back as None (see s1_growth_curves.download_tolerant)."""
     try:
-        return client.download(dl, max_threads=max_threads, show_progress=False, raise_download_errors=False)
+        return download_tolerant([r.download_list[0] for r in requests], config, max_threads=max_threads)
     except Exception as exc:
         raise RuntimeError(f"Failed downloading from Sentinel Hub: {exc}") from exc
 
@@ -329,6 +321,7 @@ def find_latest_clear_scene(
     so the decision is made on the field's own SCL mask.
     """
     best: Scene | None = None
+    last_error: Exception | None = None
     for _, row in scenes_df.head(max_tries).iterrows():
         if progress:
             progress(f"Checking {row['date']} ...")
@@ -336,13 +329,15 @@ def find_latest_clear_scene(
             sc = fetch_s2_scene(field_id, geom_wgs84, row["datetime"], config, row.get("cloud_cover_pct"))
         except Exception as exc:  # a single bad date shouldn't abort the search
             logger.warning("Skipping %s: %s", row["date"], exc)
+            last_error = exc
             continue
         if best is None or sc.clear_fraction > best.clear_fraction:
             best = sc
         if sc.clear_fraction >= min_clear_fraction:
             return sc
     if best is None:
-        raise RuntimeError("Could not download any Sentinel-2 scene for this field/date range.")
+        raise RuntimeError("Could not download any Sentinel-2 scene for this field/date range."
+                           + (f" Last error: {last_error}" if last_error else ""))
     best.meta["warning"] = (f"No scene reached {min_clear_fraction:.0%} clear pixels inside the field; "
                             f"using the clearest ({best.date}: {best.clear_fraction:.0%} clear).")
     return best
