@@ -11,7 +11,9 @@ import plotly.express as px
 import streamlit as st
 
 from src import ui_common as ui
-from src.imagery_viz import COMPOSITES, colorize, histogram_figure, image_figure, png_bytes, raster_figure, rgb_composite, to_uint8
+from src.imagery_viz import (COMPOSITES, RENDER_MODES, colorize, hd_render, histogram_figure, image_figure, natural_rgb, png_bytes,
+                             raster_figure)
+from src.map_view import BASEMAPS, DEFAULT_BASEMAP, MAP_CONFIG, boundary_map, rgba_from_rgb
 from src.raster_calc import (ALIASES, FUNCTIONS, PRESETS, S2_BAND_INFO, S2_BANDS, available_presets, build_layers, evaluate,
                              referenced_names, summarize, validate_expression, ExpressionError)
 
@@ -37,6 +39,18 @@ creds = ui.credentials_sidebar() if not demo else {"threads": 4}
 
 if demo:
     st.warning("**Synthetic demo data.** This field, its spectra and its gaps are simulated to let you try the tools without credentials.")
+
+# ------------------------------------------------------------------ field map (boundaries over a basemap)
+with st.expander("🗺️ Field map - your boundaries over a basemap", expanded=True):
+    fm1, fm2 = st.columns([2, 1])
+    bm_names = list(BASEMAPS)
+    basemap0 = fm1.selectbox("Basemap", bm_names, index=bm_names.index(st.session_state.get("_basemap", DEFAULT_BASEMAP)), key="fm_basemap_3")
+    st.session_state["_basemap"] = basemap0
+    show_all0 = fm2.checkbox("Show all fields", value=True, key="fm_all_3")
+    st.plotly_chart(boundary_map(fields if show_all0 else fields[fields["field_id"].astype(str) == field_id], "field_id", field_id, basemap0),
+                    use_container_width=True, config=MAP_CONFIG)
+    st.caption("Red = selected field, yellow = other fields. Scroll to zoom, drag to pan, hover for field details. "
+               "Basemap tiles load in your browser (internet needed).")
 
 # ------------------------------------------------------------------ scene selection
 st.subheader("1 · Get imagery")
@@ -93,14 +107,37 @@ m3.metric("Tile cloud cover", "n/a" if scene.cloud_catalog is None else f"{scene
 m4.metric("Field area", f"{scene.field_area_ha:.1f} ha" if scene.field_area_ha else "n/a")
 m5.metric("Sentinel-1", f"{scene.s1['n_scenes']} scene(s)" if scene.s1 else "not loaded")
 
-tab_comp, tab_bands, tab_calc, tab_hist, tab_s1 = st.tabs(
-    ["🖼️ Composites", "📚 Bands", "🧮 Raster calculator", "🕒 Recent scenes", "📡 Sentinel-1"])
+tab_map, tab_comp, tab_bands, tab_calc, tab_hist, tab_s1 = st.tabs(
+    ["🗺️ Map overlay", "🖼️ Composites (HD)", "📚 Bands", "🧮 Raster calculator", "🕒 Recent scenes", "📡 Sentinel-1"])
 
 boundary = scene.boundary_utm
 
+# ------------------------------------------------------------------ map overlay
+with tab_map:
+    mo1, mo2, mo3 = st.columns([2, 2, 1])
+    bm_names = list(BASEMAPS)
+    basemap = mo1.selectbox("Basemap", bm_names, index=bm_names.index(st.session_state.get("_basemap", DEFAULT_BASEMAP)), key="map_basemap")
+    st.session_state["_basemap"] = basemap
+    avail_map = [k for k in available_presets(build_layers(scene.bands)) if k not in ("RVI", "VH_VV_DB")]
+    layer_choice = mo2.selectbox("Image on the map", ["True colour (HD)"] + avail_map + ["None (boundaries only)"])
+    opacity = mo3.slider("Opacity", 0.1, 1.0, 0.85, 0.05)
+    overlay = None
+    if layer_choice == "True colour (HD)":
+        rgbf = natural_rgb(scene.bands, mask=scene.clear_mask)
+        hd_img, hd_valid, _ = hd_render(rgbf, "HD x4 + sharpen")
+        overlay = (rgba_from_rgb(hd_img, hd_valid), scene.grid)
+    elif layer_choice != "None (boundaries only)":
+        pr = PRESETS[layer_choice]
+        idx = evaluate(pr.formula, build_layers(scene.bands), scene.clear_mask)
+        overlay = (rgba_from_rgb(colorize(idx, pr.cmap, pr.vmin, pr.vmax), scene.clear_mask & (idx == idx)), scene.grid)
+    st.plotly_chart(boundary_map(fields, "field_id", field_id, basemap, overlay=overlay, overlay_opacity=opacity,
+                                 title=f"{field_id} · {scene.date} · {layer_choice}", height=620), use_container_width=True, config=MAP_CONFIG)
+    st.caption("The image is reprojected to lon/lat and draped over the basemap - lower the opacity to compare with the underlying "
+               "(higher-resolution) satellite tiles. Scroll to zoom, drag to pan.")
+
 # ------------------------------------------------------------------ composites
 with tab_comp:
-    cc1, cc2, cc3 = st.columns([2, 1, 1])
+    cc1, cc2 = st.columns([2, 1])
     choice = cc1.selectbox("Composite", list(COMPOSITES) + ["Custom (pick 3 bands)"])
     if choice.startswith("Custom"):
         r, g, b = st.columns(3)
@@ -109,13 +146,20 @@ with tab_comp:
                 b.selectbox("Blue channel", S2_BANDS, index=S2_BANDS.index("B03")))
     else:
         trip = COMPOSITES[choice]
-    lo, hi = cc2.slider("Stretch percentiles", 0, 100, (2, 98))
-    mask_clouds = cc3.checkbox("Hide clouds / shadow", value=True)
-    rgb = rgb_composite(scene.bands, trip, lo, hi, scene.clear_mask if mask_clouds else scene.field_mask)
-    st.plotly_chart(image_figure(to_uint8(rgb), scene.grid, boundary, f"{choice} · {scene.date}"), use_container_width=True)
-    st.download_button("Download composite PNG", png_bytes(to_uint8(rgb)), f"{field_id}_{scene.date}_composite.png", "image/png")
-    st.caption("Black line = field boundary. White = outside the field, masked, or no data. "
-               "In false colour, healthy cane is bright red; bare soil is cyan/grey; clouds are white.")
+    render_mode = cc2.selectbox("Rendering", list(RENDER_MODES), index=list(RENDER_MODES).index("HD x4 + sharpen"),
+                                help="Sentinel-2 is 10 m per pixel. HD mode interpolates and sharpens so it is easier to read; it cannot add real detail.")
+    q1, q2, q3, q4 = st.columns(4)
+    lo, hi = q1.slider("Stretch percentiles", 0, 100, (1, 99))
+    gamma = q2.slider("Brightness (gamma)", 0.4, 1.4, 0.85, 0.05, help="Below 1 brightens dark canopy.")
+    joint = q3.radio("Colour balance", ["Natural (one stretch)", "Per band"], horizontal=False) .startswith("Natural")
+    mask_clouds = q4.checkbox("Hide clouds / shadow", value=True)
+    rgbf = natural_rgb(scene.bands, trip, scene.clear_mask if mask_clouds else scene.field_mask, lo, hi, gamma, joint)
+    shown, _, factor = hd_render(rgbf, render_mode)
+    st.plotly_chart(image_figure(shown, scene.grid, boundary, f"{choice} · {scene.date}", scale=factor, height=640),
+                    use_container_width=True, config=MAP_CONFIG)
+    st.download_button("Download composite PNG (as displayed)", png_bytes(shown), f"{field_id}_{scene.date}_composite.png", "image/png")
+    st.caption("Black line = field boundary. White = outside the field, masked, or no data. In false colour, healthy cane is bright red; "
+               "bare soil is cyan/grey; clouds are white. For sharper context use the **Map overlay** tab with the Esri satellite basemap.")
 
 # ------------------------------------------------------------------ bands
 with tab_bands:

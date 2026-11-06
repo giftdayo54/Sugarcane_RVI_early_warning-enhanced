@@ -15,11 +15,13 @@ import plotly.express as px
 import streamlit as st
 
 from src import ui_common as ui
-from src.gap_detection import (BARE_GAP, CLASS_COLORS, CLASS_LABELS, GAP_CLASSES, HEALTHY, THIN, WEEDY_GAP, GapParams,
+from src.gap_detection import (expected_cane_height, BARE_GAP, CLASS_COLORS, CLASS_LABELS, GAP_CLASSES, HEALTHY, THIN, WEEDY_GAP, GapParams,
                                analyze_scene, classify_supervised, gap_polygons, params_from_config, sample_features_at_points,
                                validate_against_reference, validate_against_truth_raster)
 from src.gap_reporting import height_for_age, save_result, severity
-from src.imagery_viz import class_figure, class_png, colorize, histogram_figure, image_figure, png_bytes, raster_figure, rgb_composite, to_uint8
+from src.imagery_viz import (RENDER_MODES, class_figure, class_png, colorize, hd_render, histogram_figure, image_figure, natural_rgb, png_bytes,
+                             raster_figure)
+from src.map_view import BASEMAPS, DEFAULT_BASEMAP, MAP_CONFIG, boundary_map, rgba_from_rgb
 from src.utils import load_config
 
 st.set_page_config(page_title="Gap Analysis", layout="wide")
@@ -111,6 +113,58 @@ edited = st.data_editor(
         "planting_or_last_harvest_date": st.column_config.DateColumn("Planting / last harvest date (for crop age)"),
         "avg_cane_height_m": st.column_config.NumberColumn("Average common cane height (m)", min_value=0.1, max_value=8.0, step=0.1, format="%.2f"),
     })
+
+with st.expander("🗺️ Field map - your boundaries over a basemap", expanded=False):
+    gm1, gm2 = st.columns([2, 1])
+    _bms = list(BASEMAPS)
+    gbase = gm1.selectbox("Basemap", _bms, index=_bms.index(st.session_state.get("_basemap", DEFAULT_BASEMAP)), key="fm_basemap_4")
+    st.session_state["_basemap"] = gbase
+    gall = gm2.checkbox("Show all fields", value=True, key="fm_all_4")
+    st.plotly_chart(boundary_map(fields if gall else fields[fields["field_id"].astype(str).isin(sel_ids)], "field_id", sel_ids, gbase),
+                    use_container_width=True, config=MAP_CONFIG)
+
+base = params_from_config(CFG)
+with st.expander("📏 How to read the heights on this page (all in metres)", expanded=False):
+    cur_cfg = (G.get("height_curve") or {})
+    curve_kw = {k: cur_cfg[k] for k in ("h_max", "k", "t0") if k in cur_cfg}
+    ages = np.arange(0, 421, 5)
+    curve = pd.DataFrame({"Crop age (days)": ages, "Expected height (m)": [expected_cane_height(a, **curve_kw) for a in ages]})
+    figc = px.line(curve, x="Crop age (days)", y="Expected height (m)", title="Generic expected cane height vs crop age (config curve)")
+    pts = []
+    for _, r in edited.iterrows():
+        if pd.notna(r["planting_or_last_harvest_date"]) and pd.notna(r["avg_cane_height_m"]):
+            pts.append({"field": r["field_id"], "age": (pd.Timestamp(date.today()) - pd.Timestamp(r["planting_or_last_harvest_date"])).days,
+                        "h": float(r["avg_cane_height_m"])})
+    if pts:
+        pdf = pd.DataFrame(pts)
+        figc.add_scatter(x=pdf["age"], y=pdf["h"], mode="markers+text", text=pdf["field"], textposition="top center", name="Your fields (today)",
+                         marker=dict(size=11, color="#d84315"))
+    figc.update_layout(height=320, margin=dict(l=10, r=10, t=45, b=10))
+    st.plotly_chart(figc, use_container_width=True)
+    st.markdown(
+        "**Units:** every height on this page is in **metres (m)** - the crop is measured from the ground to the top of the canopy.\n\n"
+        "**1. Average common cane height (the number you type)** - what a *healthy* canopy of this crop class and age should measure in the field. "
+        "It is the yardstick. The curve above is only a generic starting guess (logistic, max ≈ 3.6 m, set in `config.yaml → gaps.height_curve`); "
+        "replace it with heights you actually measure for your varieties and ages. Orange dots show your fields' ages vs the heights entered.\n\n"
+        "**2. Height proxy map (m)** - *not a measured height.* Sentinel-1 VH is converted to a relative canopy index "
+        "(0 = bare-soil radar level, 1 = this field's own healthy-cane level) and multiplied by the reference height. Read it as "
+        "*'how cane-like is the canopy structure, expressed in metres of cane'*: ~0 m = bare ground, ≈ reference = full cane canopy, "
+        "above the reference (up to 1.3×) = denser than the field's typical cane. A weed patch showing 0.8 m means its radar signal is about "
+        "a quarter of cane's - the weeds are short, but 0.8 m is not a tape-measure value.\n\n"
+        "**3. Thresholds in metres** - gap-height and full-canopy limits are fractions of the reference (table below). "
+        "**4. Measured canopy-height raster** - if you upload a UAV/LiDAR model (Detection parameters), heights become true metres.\n\n"
+        "**Not to be confused with** the *Growth Curves* page: its y-axis is Sentinel-1 VH backscatter in **dB**, not metres.")
+    ex = []
+    for _, r in edited.iterrows():
+        if pd.notna(r["avg_cane_height_m"]):
+            h0 = float(r["avg_cane_height_m"])
+            ex.append({"Field": r["field_id"], "Reference height (m)": round(h0, 2),
+                       f"Gap-height: shorter than (m)": round(h0 * base.h_gap_frac, 2),
+                       "Full canopy: at least (m)": round(h0 * base.h_ok_frac, 2),
+                       "Thin / stunted: in between": f"{h0 * base.h_gap_frac:.2f}-{h0 * base.h_ok_frac:.2f} m"})
+    if ex:
+        st.dataframe(pd.DataFrame(ex), hide_index=True, use_container_width=True)
+        st.caption("Table uses the default fractions from config; the sliders in *Detection parameters* change them.")
 
 # ------------------------------------------------------------------ detection parameters
 with st.expander("2 · Detection parameters", expanded=False):
@@ -277,15 +331,40 @@ def show_single(run):
     elif s["mode"] == "S2 only":
         st.info("Optical-only mode: weed-covered gaps cannot be separated from cane. Add Sentinel-1 or a canopy-height raster.")
 
-    t_map, t_why, t_cmp, t_thr, t_patch, t_val, t_ml = st.tabs(
-        ["🗺️ Map", "🔬 Why NDVI misses weeds", "↔️ NDVI-only vs fused", "🎚️ Thresholds", "📋 Patches", "✅ Validation", "🤖 Train on my points"])
+    t_map, t_base, t_why, t_cmp, t_thr, t_patch, t_val, t_ml = st.tabs(
+        ["🗺️ Map", "🛰️ On basemap", "🔬 Why NDVI misses weeds", "↔️ NDVI-only vs fused", "🎚️ Thresholds", "📋 Patches", "✅ Validation", "🤖 Train on my points"])
 
     with t_map:
+        rmode = st.selectbox("True-colour rendering", list(RENDER_MODES), index=list(RENDER_MODES).index("HD x4 + sharpen"), key="gap_render")
         a, b = st.columns(2)
-        rgb = rgb_composite(scene.bands, ("B04", "B03", "B02"), 2, 98, scene.clear_mask)
-        a.plotly_chart(image_figure(to_uint8(rgb), scene.grid, boundary, f"True colour · {scene.date}"), use_container_width=True)
+        hd_img, _, hd_scale = hd_render(natural_rgb(scene.bands, mask=scene.clear_mask), rmode)
+        a.plotly_chart(image_figure(hd_img, scene.grid, boundary, f"True colour · {scene.date}", scale=hd_scale, height=520), use_container_width=True, config=MAP_CONFIG)
         b.plotly_chart(class_figure(result.class_map, scene.grid, boundary, "Gap classification"), use_container_width=True)
         st.caption("Amber = green gap that is short (weeds). Red = bare soil. Light green = vegetated but thin/stunted. Grey/blank = excluded (cloud, edge buffer, outside).")
+
+    with t_base:
+        bb1, bb2, bb3 = st.columns([2, 2, 1])
+        _bm = list(BASEMAPS)
+        gb = bb1.selectbox("Basemap", _bm, index=_bm.index(st.session_state.get("_basemap", DEFAULT_BASEMAP)), key="gap_basemap")
+        st.session_state["_basemap"] = gb
+        what = bb2.selectbox("Draped image", ["Gap classification", "True colour (HD)", "Gap outlines only"])
+        op = bb3.slider("Opacity", 0.1, 1.0, 0.75, 0.05, key="gap_op")
+        ov, outlines, smooth = None, None, False
+        if what == "Gap classification":
+            rgb_c = np.full(result.class_map.shape + (3,), 255, dtype=np.uint8)
+            for k_, hx in CLASS_COLORS.items():
+                rgb_c[result.class_map == k_] = [int(hx[i:i + 2], 16) for i in (1, 3, 5)]
+            ov = (rgba_from_rgb(rgb_c, result.class_map != 0), scene.grid)
+        elif what == "True colour (HD)":
+            hd2, v2, _ = hd_render(natural_rgb(scene.bands, mask=scene.clear_mask), "HD x4 + sharpen")
+            ov, smooth = (rgba_from_rgb(hd2, v2), scene.grid), True
+        if what == "Gap outlines only" or what == "True colour (HD)":
+            outlines = gap_polygons(result.class_map, scene.grid, scene.field_id, scene.date)
+        st.plotly_chart(boundary_map(fields, "field_id", scene.field_id, gb, overlay=ov, overlay_opacity=op, overlay_smooth=smooth,
+                                     title=f"{scene.field_id} · {scene.date} · {what}", height=640, extra_polygons=outlines),
+                        use_container_width=True, config=MAP_CONFIG)
+        st.caption("Gap pixels draped on real-world imagery - zoom in on the Esri satellite tiles to check whether a flagged patch is "
+                   "bare ground or a weedy/short-canopy area before sending a team.")
 
     with t_why:
         f = result.features
@@ -294,6 +373,9 @@ def show_single(run):
         if "height_m" in f:
             cols[1].plotly_chart(raster_figure(f["height_m"], scene.grid, boundary, f"Canopy height proxy (m) - ref {p.h_ref_m:.1f} m", "YlGn", 0, p.h_ref_m * 1.2, "m"),
                                  use_container_width=True)
+            cols[1].caption(f"Metres of *cane-equivalent* canopy: ≈{p.h_ref_m:.1f} m = full cane canopy, 0 m = bare-soil radar level. "
+                            f"Below {p.h_gap_frac * p.h_ref_m:.1f} m = gap-height; ≥ {p.h_ok_frac * p.h_ref_m:.1f} m = full canopy. "
+                            "A proxy from radar structure, not a tape-measure height (see the heights guide above).")
         if "vh_db" in f:
             cols[2].plotly_chart(raster_figure(f["vh_db"], scene.grid, boundary, "Sentinel-1 VH (dB)", "viridis"), use_container_width=True)
         if "height_m" in f:

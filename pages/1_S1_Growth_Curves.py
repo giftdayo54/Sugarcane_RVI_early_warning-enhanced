@@ -42,11 +42,30 @@ st.caption(
 )
 
 
+with st.expander("How to read these growth curves (units, height, what to look for)"):
+    st.markdown(
+        "**What the vertical axis is:** Sentinel-1 **VH backscatter in decibels (dB)** - the strength of the radar echo returned in the "
+        "cross-polarised channel. It is **not a height in metres**, and not a biomass number. dB values are negative; "
+        "*higher* (closer to 0, e.g. -16 vs -22) means a stronger echo.\n\n"
+        "**How that relates to cane height:** VH responds to canopy *structure and volume*. Bare or freshly cut ground returns a weak "
+        "echo (low dB); as stalks and leaves fill the canopy the echo strengthens, so the curve generally **rises with growth** and then "
+        "**flattens** once the canopy is dense (the signal saturates, so it stops distinguishing a 3 m from a 4 m crop). "
+        "There is no fixed dB-to-metres conversion: it shifts with orbit, incidence angle, soil/canopy moisture and variety. "
+        "For heights in **metres** use the *Gap Analysis* page, which scales the VH signal to the average cane height you enter.\n\n"
+        "**Grey dots** are individual acquisitions (raw field mean); the **blue line** is the smoothed trend (Savitzky-Golay). "
+        "Rain/wetting and speckle cause scatter of roughly a dB or two between dates, so judge the trend, not single points.\n\n"
+        "**Summary table:** *date_of_peak_VH* = when the smoothed curve is highest (the canopy has peaked; later decline suggests "
+        "lodging, senescence, drying or harvest); *max_VH* = that peak level (dB); *growth_rate_slope_first_90_days* = dB gained per day over the "
+        "first 90 days after the start date (steeper = faster canopy build-up).\n\n"
+        "**What to look for:** compare fields of the same crop class on the **same orbit**: a field whose curve rises later, plateaus lower, "
+        "or dips while its neighbours hold is a candidate for stress, poor stand (gaps) or water problems - check it with the Satellite "
+        "Imagery and Gap Analysis pages.")
+
+
 def _secret(key: str, default: str = "") -> str:
-    try:
-        return st.secrets.get(key, default)
-    except Exception:
-        return default
+    # robust lookup: top-level key, aliases, [sections], environment variables (see src/secrets_util.py)
+    from src.secrets_util import get_secret
+    return get_secret(key, default)
 
 
 with st.sidebar:

@@ -65,10 +65,9 @@ RISK_COLORS = {
 
 
 def _secret(key: str, default: str = "") -> str:
-    try:
-        return st.secrets.get(key, default)
-    except Exception:
-        return default
+    # robust lookup: top-level key, aliases, [sections], environment variables (see src/secrets_util.py)
+    from src.secrets_util import get_secret
+    return get_secret(key, default)
 
 
 uploaded = st.file_uploader("Farm boundaries (GeoJSON)", type=["geojson", "json"])

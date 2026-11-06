@@ -31,10 +31,8 @@ MAX_CACHED_SCENES = 6
 
 
 def secret(key: str, default: str = "") -> str:
-    try:
-        return st.secrets.get(key, default)
-    except Exception:
-        return default
+    from .secrets_util import get_secret
+    return get_secret(key, default)
 
 
 # --------------------------------------------------------------------------
@@ -42,18 +40,42 @@ def secret(key: str, default: str = "") -> str:
 # --------------------------------------------------------------------------
 
 def credentials_sidebar() -> dict:
-    """Sidebar credential inputs that persist across pages. Returns a plain dict."""
+    """Sidebar credentials. Secrets (Streamlit secrets / env vars) are used automatically; the text boxes are only an
+    optional override and are never pre-filled with a stored secret. Returns a plain dict."""
+    from .secrets_util import diagnostics, find_secret
     ss = st.session_state
+    sec_id, src_id = find_secret("SH_CLIENT_ID")
+    sec_pw, src_pw = find_secret("SH_CLIENT_SECRET")
+    base_default, _ = find_secret("SH_BASE_URL", CDSE_BASE)
+    token_default, _ = find_secret("SH_TOKEN_URL", CDSE_TOKEN)
+
     st.sidebar.subheader("Sentinel Hub credentials")
-    st.sidebar.caption("Free: dataspace.copernicus.eu -> User Settings -> OAuth clients.")
-    cid = st.sidebar.text_input("Client ID", value=ss.get("_sh_id") or secret("SH_CLIENT_ID"), type="password", key="in_sh_id")
-    csec = st.sidebar.text_input("Client secret", value=ss.get("_sh_secret") or secret("SH_CLIENT_SECRET"), type="password", key="in_sh_secret")
+    have_secrets = bool(sec_id and sec_pw)
+    if have_secrets:
+        st.sidebar.success(f"Using credentials from {src_id}.")
+    else:
+        st.sidebar.info("No credentials found in Streamlit secrets or environment - enter them below "
+                        "(or fill .streamlit/secrets.toml).")
+    with st.sidebar.expander("Enter / override credentials", expanded=not have_secrets):
+        typed_id = st.text_input("Client ID", value=ss.get("_sh_id", ""), type="password",
+                                 placeholder="from secrets" if sec_id else "sh-xxxxxxxx-...")
+        typed_pw = st.text_input("Client secret", value=ss.get("_sh_secret", ""), type="password",
+                                 placeholder="from secrets" if sec_pw else "")
     with st.sidebar.expander("Advanced"):
-        base = st.text_input("Base URL", value=ss.get("_sh_base") or secret("SH_BASE_URL", CDSE_BASE), key="in_sh_base")
-        token = st.text_input("Token URL", value=ss.get("_sh_token") or secret("SH_TOKEN_URL", CDSE_TOKEN), key="in_sh_token")
-        threads = st.slider("Parallel downloads", 1, 8, 4, key="in_sh_threads")
-    ss.update({"_sh_id": cid, "_sh_secret": csec, "_sh_base": base, "_sh_token": token})
-    return {"id": cid, "secret": csec, "base": base, "token": token, "threads": threads}
+        base = st.text_input("Base URL", value=ss.get("_sh_base") or base_default)
+        token = st.text_input("Token URL", value=ss.get("_sh_token") or token_default)
+        threads = st.slider("Parallel downloads", 1, 8, 4)
+    with st.sidebar.expander("My secrets aren't loading - diagnose"):
+        d = diagnostics()
+        st.caption("Names only - values are never shown.")
+        st.write({"top-level keys seen": d["top_level_keys"] or "none", "sections seen": d["sections"] or "none",
+                  "SH_CLIENT_ID": d["found"]["SH_CLIENT_ID"], "SH_CLIENT_SECRET": d["found"]["SH_CLIENT_SECRET"]})
+        st.markdown("- Keys must be named `SH_CLIENT_ID` / `SH_CLIENT_SECRET` (top level), or sit in a `[sentinelhub]`, `[cdse]` "
+                    "or `[copernicus]` section.\n- Locally the file is `.streamlit/secrets.toml` (next to where you run `streamlit run`).\n"
+                    "- On Streamlit Cloud paste the same text in *Settings → Secrets* and **reboot the app**.\n"
+                    "- Blank or placeholder values (`your-...`) are ignored.")
+    ss.update({"_sh_id": typed_id, "_sh_secret": typed_pw, "_sh_base": base, "_sh_token": token})
+    return {"id": typed_id or sec_id, "secret": typed_pw or sec_pw, "base": base, "token": token, "threads": threads}
 
 
 def get_config(creds: dict):

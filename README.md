@@ -235,3 +235,29 @@ Gap patches smaller than 4 pixels (0.04 ha) and a 10 m edge buffer are excluded.
 * 10 m pixels cannot resolve gaps narrower than ~1–2 pixels: results are *detectable gap area*, not stool counts.
 * Keep the S1 orbit consistent (ascending by default, as in the RVI baseline).
 * The synthetic demo data exists only to run the workflow without credentials; tests on it show the code works, not real accuracy.
+
+
+### Credentials (secrets), maps and HD imagery (updates)
+
+**Secrets.** Put your Copernicus Data Space OAuth client in `.streamlit/secrets.toml` (a ready-to-fill, git-ignored file is included;
+`.streamlit/secrets.toml.example` explains each key):
+
+```toml
+SH_CLIENT_ID = "sh-..."
+SH_CLIENT_SECRET = "..."
+```
+
+On Streamlit Community Cloud paste the same text into *Settings → Secrets* and **reboot the app** (secrets are only read at start-up).
+All pages look for `SH_CLIENT_ID` / `SH_CLIENT_SECRET` at the top level, common aliases (`client_id`, `SENTINELHUB_CLIENT_ID` …), inside a
+`[sentinelhub]`, `[cdse]` or `[copernicus]` section, or in environment variables. Blank / `your-...` placeholders are ignored. The sidebar
+says where credentials were found, and *My secrets aren't loading - diagnose* lists the key **names** the app can see (never values).
+
+**Maps.** *Satellite Imagery* and *Gap Analysis* show your boundaries over an interactive basemap (Esri World Imagery, OpenStreetMap, Carto,
+OpenTopoMap - no token required; tiles load in the browser). The *Map overlay* / *On basemap* tabs drape true colour, any index, or the gap
+classes (and gap outlines) over it with adjustable opacity.
+
+**True colour.** Rendering uses one joint stretch (true hue), gamma and a mild saturation lift; *HD x4 + sharpen* interpolates and sharpens for
+legibility. Sentinel-2 is 10 m per pixel, so this improves readability but adds no real detail - use the satellite basemap for finer context.
+
+**Reading heights.** Growth Curves plots Sentinel-1 VH in **dB** (not metres). Gap Analysis heights are in **metres**: the reference is the average
+cane height you enter; the height-proxy map is a radar-derived, cane-equivalent value (see the in-app guides on both pages).
