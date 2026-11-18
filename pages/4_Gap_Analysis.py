@@ -19,7 +19,7 @@ from src.gap_detection import (expected_cane_height, BARE_GAP, CLASS_COLORS, CLA
                                analyze_scene, classify_supervised, gap_polygons, params_from_config, sample_features_at_points,
                                validate_against_reference, validate_against_truth_raster)
 from src.gap_reporting import height_for_age, save_result, severity
-from src.imagery_viz import (RENDER_MODES, class_figure, class_png, colorize, hd_render, histogram_figure, image_figure, natural_rgb, png_bytes,
+from src.imagery_viz import (class_figure, class_png, colorize, histogram_figure, image_figure, png_bytes,
                              raster_figure)
 from src.map_view import BASEMAPS, DEFAULT_BASEMAP, MAP_CONFIG, boundary_map, rgba_from_rgb
 from src.utils import load_config
@@ -60,6 +60,7 @@ s1_window = st.sidebar.slider("± days around the optical image", 3, 30, int(S1D
 s1_max = st.sidebar.slider("Max scenes to composite", 1, 6, int(S1D.get("max_scenes", 4)))
 s1_speckle = st.sidebar.select_slider("Speckle filter (px)", [1, 3, 5], value=int(S1D.get("speckle_px", 3)))
 creds = ui.credentials_sidebar() if not demo else {"threads": 4}
+disp_res, disp_up = ui.display_res_sidebar()
 
 if demo:
     st.warning("**Synthetic demo data.** The field, spectra and gaps are simulated so you can try the workflow without credentials. "
@@ -335,10 +336,16 @@ def show_single(run):
         ["🗺️ Map", "🛰️ On basemap", "🔬 Why NDVI misses weeds", "↔️ NDVI-only vs fused", "🎚️ Thresholds", "📋 Patches", "✅ Validation", "🤖 Train on my points"])
 
     with t_map:
-        rmode = st.selectbox("True-colour rendering", list(RENDER_MODES), index=list(RENDER_MODES).index("HD x4 + sharpen"), key="gap_render")
+        _modes = ui.render_mode_options(disp_res)
+        rmode = st.selectbox("True-colour rendering", _modes, index=len(_modes) - 1, key="gap_render")
         a, b = st.columns(2)
-        hd_img, _, hd_scale = hd_render(natural_rgb(scene.bands, mask=scene.clear_mask), rmode)
-        a.plotly_chart(image_figure(hd_img, scene.grid, boundary, f"True colour · {scene.date}", scale=hd_scale, height=520), use_container_width=True, config=MAP_CONFIG)
+        try:
+            tc = ui.render_true_colour(scene, demo, creds, disp_res, disp_up, rmode)
+            a.plotly_chart(image_figure(tc["img"], tc["grid"], boundary, f"True colour · {scene.date} · {disp_res:g} m/px", scale=tc["scale"], height=520),
+                           use_container_width=True, config=MAP_CONFIG)
+            a.caption(tc["note"] + ". Gap detection itself always runs on the native 10 m grid.")
+        except Exception as exc:
+            a.error(f"Could not render at {disp_res:g} m/px: {exc}")
         b.plotly_chart(class_figure(result.class_map, scene.grid, boundary, "Gap classification"), use_container_width=True)
         st.caption("Amber = green gap that is short (weeds). Red = bare soil. Light green = vegetated but thin/stunted. Grey/blank = excluded (cloud, edge buffer, outside).")
 
@@ -356,8 +363,11 @@ def show_single(run):
                 rgb_c[result.class_map == k_] = [int(hx[i:i + 2], 16) for i in (1, 3, 5)]
             ov = (rgba_from_rgb(rgb_c, result.class_map != 0), scene.grid)
         elif what == "True colour (HD)":
-            hd2, v2, _ = hd_render(natural_rgb(scene.bands, mask=scene.clear_mask), "HD x4 + sharpen")
-            ov, smooth = (rgba_from_rgb(hd2, v2), scene.grid), True
+            try:
+                tc2 = ui.render_true_colour(scene, demo, creds, disp_res, disp_up, ui.render_mode_options(disp_res)[-1])
+                ov, smooth = (rgba_from_rgb(tc2["img"], tc2["valid"]), tc2["grid"]), True
+            except Exception as exc:
+                st.error(f"Could not build the {disp_res:g} m/px image: {exc}")
         if what == "Gap outlines only" or what == "True colour (HD)":
             outlines = gap_polygons(result.class_map, scene.grid, scene.field_id, scene.date)
         st.plotly_chart(boundary_map(fields, "field_id", scene.field_id, gb, overlay=ov, overlay_opacity=op, overlay_smooth=smooth,

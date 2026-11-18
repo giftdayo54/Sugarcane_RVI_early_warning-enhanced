@@ -261,3 +261,18 @@ legibility. Sentinel-2 is 10 m per pixel, so this improves readability but adds 
 
 **Reading heights.** Growth Curves plots Sentinel-1 VH in **dB** (not metres). Gap Analysis heights are in **metres**: the reference is the average
 cane height you enter; the height-proxy map is a radar-derived, cane-equivalent value (see the in-app guides on both pages).
+
+### Image resolution: 1 m/px display and "Analytical download"
+
+The sidebar of *Satellite Imagery* and *Gap Analysis* has **True-colour display resolution** (default **1 m/px**; also 2, 5, 10) and a **Resampling**
+method (bicubic / bilinear / nearest). This reproduces the Copernicus Browser's *Analytical → custom resolution* request: the Process API is asked
+for the bands at e.g. 1 x 1 m/px and resamples Sentinel-2's native pixels onto that finer grid, then the app applies a resolution-scaled
+sharpening for edge contrast.
+
+* **What it does:** removes the blocky look and makes fields, tracks and gaps easy to read.
+* **What it can't do:** Sentinel-2 is 10 m (B02/B03/B04/B08), 20 m (red-edge, SWIR) and 60 m (B01/B09). 1 m/px is *interpolation*, not new ground
+  detail - exactly as in the Copernicus Browser. For genuinely finer detail use the satellite basemap tabs, UAV imagery, or a commercial VHR source.
+* **Gap detection is unaffected:** classification, hectares and thresholds always use the native 10 m grid.
+* **Analytical download tab:** pick bands, X and Y resolution separately, UTM or WGS 84 (EPSG:4326), resampling; get a multi-band 32-bit float
+  GeoTIFF clipped to the field, with band names and a metadata note that it is resampled. Fields larger than 2,500 px at the requested resolution
+  are automatically coarsened (the page tells you the resolution used). Larger/finer requests use more Copernicus processing units.

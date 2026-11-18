@@ -11,8 +11,8 @@ import plotly.express as px
 import streamlit as st
 
 from src import ui_common as ui
-from src.imagery_viz import (COMPOSITES, RENDER_MODES, colorize, hd_render, histogram_figure, image_figure, natural_rgb, png_bytes,
-                             raster_figure)
+from src.imagery import plan_fine_grid, UPSAMPLING_METHODS
+from src.imagery_viz import COMPOSITES, colorize, histogram_figure, image_figure, natural_rgb, png_bytes, raster_figure
 from src.map_view import BASEMAPS, DEFAULT_BASEMAP, MAP_CONFIG, boundary_map, rgba_from_rgb
 from src.raster_calc import (ALIASES, FUNCTIONS, PRESETS, S2_BAND_INFO, S2_BANDS, available_presets, build_layers, evaluate,
                              referenced_names, summarize, validate_expression, ExpressionError)
@@ -36,6 +36,7 @@ min_clear = st.sidebar.slider("Min. cloud-free share of the field", 0.5, 1.0, 0.
                               help="'Latest clear image' keeps going back in time until the field itself is at least this clear.")
 max_tile_cloud = st.sidebar.slider("Skip scenes with tile cloud cover above (%)", 10, 100, 80, 5) if not demo else 100
 creds = ui.credentials_sidebar() if not demo else {"threads": 4}
+disp_res, disp_up = ui.display_res_sidebar()
 
 if demo:
     st.warning("**Synthetic demo data.** This field, its spectra and its gaps are simulated to let you try the tools without credentials.")
@@ -107,8 +108,8 @@ m3.metric("Tile cloud cover", "n/a" if scene.cloud_catalog is None else f"{scene
 m4.metric("Field area", f"{scene.field_area_ha:.1f} ha" if scene.field_area_ha else "n/a")
 m5.metric("Sentinel-1", f"{scene.s1['n_scenes']} scene(s)" if scene.s1 else "not loaded")
 
-tab_map, tab_comp, tab_bands, tab_calc, tab_hist, tab_s1 = st.tabs(
-    ["🗺️ Map overlay", "🖼️ Composites (HD)", "📚 Bands", "🧮 Raster calculator", "🕒 Recent scenes", "📡 Sentinel-1"])
+tab_map, tab_comp, tab_bands, tab_calc, tab_hist, tab_s1, tab_dl = st.tabs(
+    ["🗺️ Map overlay", "🖼️ Composites (HD)", "📚 Bands", "🧮 Raster calculator", "🕒 Recent scenes", "📡 Sentinel-1", "⬇️ Analytical download"])
 
 boundary = scene.boundary_utm
 
@@ -123,9 +124,11 @@ with tab_map:
     opacity = mo3.slider("Opacity", 0.1, 1.0, 0.85, 0.05)
     overlay = None
     if layer_choice == "True colour (HD)":
-        rgbf = natural_rgb(scene.bands, mask=scene.clear_mask)
-        hd_img, hd_valid, _ = hd_render(rgbf, "HD x4 + sharpen")
-        overlay = (rgba_from_rgb(hd_img, hd_valid), scene.grid)
+        try:
+            tc = ui.render_true_colour(scene, demo, creds, disp_res, disp_up, ui.render_mode_options(disp_res)[-1])
+            overlay = (rgba_from_rgb(tc["img"], tc["valid"]), tc["grid"])
+        except Exception as exc:
+            st.error(f"Could not build the {disp_res:g} m/px image: {exc}")
     elif layer_choice != "None (boundaries only)":
         pr = PRESETS[layer_choice]
         idx = evaluate(pr.formula, build_layers(scene.bands), scene.clear_mask)
@@ -146,20 +149,25 @@ with tab_comp:
                 b.selectbox("Blue channel", S2_BANDS, index=S2_BANDS.index("B03")))
     else:
         trip = COMPOSITES[choice]
-    render_mode = cc2.selectbox("Rendering", list(RENDER_MODES), index=list(RENDER_MODES).index("HD x4 + sharpen"),
-                                help="Sentinel-2 is 10 m per pixel. HD mode interpolates and sharpens so it is easier to read; it cannot add real detail.")
+    modes = ui.render_mode_options(disp_res)
+    render_mode = cc2.selectbox("Rendering", modes, index=len(modes) - 1,
+                                help="Fine resolutions are already interpolated by Sentinel Hub; sharpening restores edge contrast.")
     q1, q2, q3, q4 = st.columns(4)
     lo, hi = q1.slider("Stretch percentiles", 0, 100, (1, 99))
     gamma = q2.slider("Brightness (gamma)", 0.4, 1.4, 0.85, 0.05, help="Below 1 brightens dark canopy.")
-    joint = q3.radio("Colour balance", ["Natural (one stretch)", "Per band"], horizontal=False) .startswith("Natural")
+    joint = q3.radio("Colour balance", ["Natural (one stretch)", "Per band"]).startswith("Natural")
     mask_clouds = q4.checkbox("Hide clouds / shadow", value=True)
-    rgbf = natural_rgb(scene.bands, trip, scene.clear_mask if mask_clouds else scene.field_mask, lo, hi, gamma, joint)
-    shown, _, factor = hd_render(rgbf, render_mode)
-    st.plotly_chart(image_figure(shown, scene.grid, boundary, f"{choice} · {scene.date}", scale=factor, height=640),
-                    use_container_width=True, config=MAP_CONFIG)
-    st.download_button("Download composite PNG (as displayed)", png_bytes(shown), f"{field_id}_{scene.date}_composite.png", "image/png")
+    try:
+        with st.spinner(f"Rendering at {disp_res:g} m/px..."):
+            tc = ui.render_true_colour(scene, demo, creds, disp_res, disp_up, render_mode, trip, mask_clouds, lo, hi, gamma, joint)
+        st.plotly_chart(image_figure(tc["img"], tc["grid"], boundary, f"{choice} · {scene.date} · {disp_res:g} m/px", scale=tc["scale"], height=640),
+                        use_container_width=True, config=MAP_CONFIG)
+        st.caption(f"{tc['note']}. {ui.RESOLUTION_NOTE}")
+        st.download_button("Download composite PNG (as displayed)", png_bytes(tc["img"]), f"{field_id}_{scene.date}_composite_{disp_res:g}m.png", "image/png")
+    except Exception as exc:
+        st.error(f"Could not render at {disp_res:g} m/px: {exc}")
     st.caption("Black line = field boundary. White = outside the field, masked, or no data. In false colour, healthy cane is bright red; "
-               "bare soil is cyan/grey; clouds are white. For sharper context use the **Map overlay** tab with the Esri satellite basemap.")
+               "bare soil is cyan/grey; clouds are white.")
 
 # ------------------------------------------------------------------ bands
 with tab_bands:
@@ -319,3 +327,33 @@ with tab_s1:
             col.plotly_chart(raster_figure(arr, scene.grid, boundary, title, cm), use_container_width=True)
         if st.button("Remove Sentinel-1 from this scene") and not scene.synthetic:
             scene.s1 = None; st.rerun()
+
+
+# ------------------------------------------------------------------ analytical download (Copernicus-Browser style)
+with tab_dl:
+    st.markdown("**Analytical download** - multi-band GeoTIFF (32-bit float reflectance), like the Copernicus Browser's *Analytical* tab.")
+    st.info(ui.RESOLUTION_NOTE)
+    d1, d2 = st.columns(2)
+    dl_bands = d1.multiselect("Bands", S2_BANDS, default=["B04", "B03", "B02", "B08"])
+    dl_crs = d2.radio("Coordinate system", ["UTM (metres, matches the analysis grid)", "WGS 84 (EPSG:4326)"])
+    e1, e2, e3 = st.columns(3)
+    rx = e1.number_input("Resolution X (m/px)", 0.25, 60.0, float(disp_res), 0.25, format="%.2f")
+    ry = e2.number_input("Resolution Y (m/px)", 0.25, 60.0, float(disp_res), 0.25, format="%.2f")
+    dl_up = e3.selectbox("Resampling", list(UPSAMPLING_METHODS), index=list(UPSAMPLING_METHODS).index(disp_up), key="dl_up")
+    plan, prx, pry, capped = plan_fine_grid(scene.grid, rx, ry)
+    est_mb = plan.width * plan.height * max(len(dl_bands), 1) * 4 / 1e6
+    st.caption(f"Image size: **{plan.width} x {plan.height} px** at {prx:g} x {pry:g} m/px - about {est_mb:.0f} MB uncompressed. Clipped to the field boundary.")
+    if capped:
+        st.warning(f"{rx:g} x {ry:g} m/px would exceed the 2,500 px limit for a field this size; it will be coarsened to {prx:g} x {pry:g} m/px.")
+    if not dl_bands:
+        st.warning("Select at least one band.")
+    elif st.button("Prepare GeoTIFF", type="primary"):
+        try:
+            with st.spinner("Requesting image..."):
+                data = ui.analytical_download_bytes(scene, demo, creds, dl_bands, rx, ry, dl_up, "EPSG:4326" if dl_crs.startswith("WGS") else "UTM")
+            st.session_state["_dl_bytes"] = (data, f"{field_id}_{scene.date}_{'-'.join(dl_bands)}_{prx:g}m.tif")
+        except Exception as exc:
+            st.error(f"Download failed: {exc}")
+    if st.session_state.get("_dl_bytes"):
+        data, fname = st.session_state["_dl_bytes"]
+        st.download_button(f"⬇️ {fname}  ({len(data) / 1e6:.1f} MB)", data, fname, "image/tiff")

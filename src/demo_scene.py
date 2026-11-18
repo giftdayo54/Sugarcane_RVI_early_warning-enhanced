@@ -18,7 +18,7 @@ from shapely.geometry import box
 
 import geopandas as gpd
 
-from .imagery import Grid, Scene, erode_mask, polygon_mask
+from .imagery import FineRaster, Grid, Scene, erode_mask, plan_fine_grid, polygon_mask, resample_mask_nearest
 from .raster_calc import S2_BANDS
 
 # mean surface reflectance per class, in S2_BANDS order
@@ -133,3 +133,24 @@ def make_demo_history(n: int = 5, end_date: str = "2026-10-28", step_days: int =
 
 def inner_mask(scene: Scene, buffer_m: float = 10.0) -> np.ndarray:
     return erode_mask(scene.field_mask, buffer_m, scene.grid.resolution)
+
+
+def make_demo_fine(scene: Scene, bands: list[str], res_x: float = 1.0, res_y: float | None = None, upsampling: str = "BICUBIC") -> FineRaster:
+    """Synthetic stand-in for ``fetch_s2_fine``: interpolates the 10 m demo bands (so it is smooth, not more detailed - like real data)."""
+    fine_grid, rx, ry, capped = plan_fine_grid(scene.grid, res_x, res_y)
+    order = {"NEAREST": 0, "BILINEAR": 1, "BICUBIC": 3}[upsampling]
+    rows = (np.arange(fine_grid.height) + 0.5) * ry / scene.grid.resolution - 0.5
+    cols = (np.arange(fine_grid.width) + 0.5) * rx / scene.grid.resolution - 0.5
+    rr, cc = np.meshgrid(rows, cols, indexing="ij")
+    out = {}
+    for b in bands:
+        src = scene.bands[b]
+        if np.isnan(src).any() and (~np.isnan(src)).any():  # fill NaN with nearest valid so cubic interpolation has no holes
+            idx = ndi.distance_transform_edt(np.isnan(src), return_distances=False, return_indices=True)
+            src = src[tuple(idx)]
+        out[b] = ndi.map_coordinates(np.nan_to_num(src), [rr, cc], order=order, mode="nearest").astype(np.float32)
+    inside = polygon_mask(scene.boundary_utm, fine_grid)
+    clear = inside & resample_mask_nearest(scene.clear_mask | ~scene.field_mask, scene.grid, fine_grid)
+    for b in bands:
+        out[b] = np.where(inside, out[b], np.nan).astype(np.float32)
+    return FineRaster(fine_grid, out, inside, clear, rx, ry, upsampling, capped, True, scene.date)

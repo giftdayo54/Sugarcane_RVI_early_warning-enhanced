@@ -87,6 +87,8 @@ def png_bytes(rgb: np.ndarray) -> bytes:
 # real detail. The satellite basemap (src/map_view.py) gives genuinely finer context.
 
 RENDER_MODES = {"Native pixels (10 m)": (1, False), "Smooth x3": (3, False), "HD x4 + sharpen": (4, True)}
+# for rasters already fetched at a finer resolution (e.g. 1 m/px): no further upscaling, optional sharpening
+FINE_RENDER_MODES = {"As fetched": (1, False), "Sharpen (recommended)": (1, True)}
 
 
 def natural_rgb(bands: dict[str, np.ndarray], triplet: tuple[str, str, str] = ("B04", "B03", "B02"), mask: np.ndarray | None = None,
@@ -115,7 +117,8 @@ def natural_rgb(bands: dict[str, np.ndarray], triplet: tuple[str, str, str] = ("
     return out.astype(np.float32)
 
 
-def hd_render(rgb: np.ndarray, mode: str = "HD x4 + sharpen", background: int = 255) -> tuple[np.ndarray, np.ndarray, int]:
+def hd_render(rgb: np.ndarray, mode: str = "HD x4 + sharpen", background: int = 255, native_res_m: float | None = None,
+              pixel_m: float | None = None) -> tuple[np.ndarray, np.ndarray, int]:
     """Upscale + (optionally) sharpen a float RGB. Returns (uint8 RGB, bool valid-mask at output size, scale factor).
 
     NaN pixels are filled with the nearest valid colour before resampling (no dark/white halo at field edges) and
@@ -123,7 +126,7 @@ def hd_render(rgb: np.ndarray, mode: str = "HD x4 + sharpen", background: int = 
     """
     from PIL import Image, ImageFilter
     from scipy import ndimage as ndi
-    factor, sharpen = RENDER_MODES.get(mode, (1, False))
+    factor, sharpen = {**RENDER_MODES, **FINE_RENDER_MODES}.get(mode, (1, False))
     bad = ~np.all(np.isfinite(rgb), axis=-1)
     filled = rgb.copy()
     if bad.any() and (~bad).any():
@@ -135,7 +138,12 @@ def hd_render(rgb: np.ndarray, mode: str = "HD x4 + sharpen", background: int = 
     if factor > 1:
         img = img.resize((img.width * factor, img.height * factor), Image.BICUBIC if not sharpen else Image.LANCZOS)
     if sharpen:
-        img = img.filter(ImageFilter.UnsharpMask(radius=1.4 * max(factor, 1) / 2, percent=110, threshold=2))
+        # blur width is ~ (native pixel size / output pixel size) output pixels; scale the unsharp radius to it
+        if native_res_m and pixel_m:
+            radius, percent = float(np.clip(0.45 * native_res_m / pixel_m, 0.8, 8.0)), 140
+        else:
+            radius, percent = 1.4 * max(factor, 1) / 2, 110
+        img = img.filter(ImageFilter.UnsharpMask(radius=radius, percent=percent, threshold=2))
     out = np.asarray(img).copy()
     valid = ~bad
     if factor > 1:

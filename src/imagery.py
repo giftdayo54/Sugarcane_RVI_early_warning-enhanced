@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 from rasterio.features import geometry_mask
 from rasterio.transform import Affine, from_bounds
+from rasterio.warp import Resampling, calculate_default_transform, reproject, transform_bounds
 from scipy import ndimage as ndi
 from shapely.geometry import shape as shapely_shape
 
@@ -82,6 +83,7 @@ class Grid:
     width: int
     height: int
     resolution: float = RESOLUTION_M
+    resolution_y: float | None = None   # only set for fine (display/export) grids; analysis grids are square
 
     @property
     def transform(self) -> Affine:
@@ -97,7 +99,7 @@ class Grid:
 
     @property
     def pixel_area_ha(self) -> float:
-        return self.resolution ** 2 / 10_000.0
+        return self.resolution * (self.resolution_y or self.resolution) / 10_000.0
 
 
 @dataclass
@@ -307,7 +309,7 @@ def fetch_s2_scene(field_id: str, geom_wgs84, acquisition_dt, config: SHConfig, 
     return Scene(field_id=str(field_id), date=pd.Timestamp(acquisition_dt).strftime("%Y-%m-%d"), grid=grid,
                  bands=bands, field_mask=fmask, clear_mask=clear, scl=scl, boundary_utm=geom_utm,
                  cloud_catalog=cloud_catalog, meta={"source": "Sentinel-2 L2A (Sentinel Hub Process API)",
-                                                    "geometry_wgs84": geom_wgs84})
+                                                    "geometry_wgs84": geom_wgs84, "acquisition_dt": pd.Timestamp(acquisition_dt)})
 
 
 def find_latest_clear_scene(
@@ -402,3 +404,134 @@ def fetch_s1_composite(
         raise ValueError("Sentinel-1 scenes were found but none covered enough of the field.")
     vv, vh = composite_s1(vvs, vhs, speckle_px)
     return {"VV": vv, "VH": vh, "n_scenes": len(vvs), "dates": used, "direction": direction, "speckle_px": speckle_px}
+
+
+# --------------------------------------------------------------------------
+# Fine-resolution (display / export) rasters - Copernicus-Browser style "custom resolution"
+# --------------------------------------------------------------------------
+# IMPORTANT: Sentinel-2 is 10 m (B02/B03/B04/B08), 20 m (red-edge, SWIR) or 60 m (B01/B09). Asking the Process API for
+# 1 m/px RESAMPLES those pixels (nearest / bilinear / bicubic). The picture is smoother and easier to read, and exports
+# match what the Copernicus Browser produces, but no new ground detail is created. Gap detection always runs on the
+# native 10 m grid, never on these interpolated rasters.
+
+UPSAMPLING_METHODS = ("BICUBIC", "BILINEAR", "NEAREST")
+
+
+@dataclass
+class FineRaster:
+    grid: Grid
+    bands: dict[str, np.ndarray]     # float32 reflectance, NaN where no data
+    valid: np.ndarray                # inside the field polygon and data present (fine resolution)
+    clear: np.ndarray                # valid AND cloud/shadow free (10 m SCL mask resampled by nearest)
+    res_x: float
+    res_y: float
+    upsampling: str
+    capped: bool = False             # requested resolution was coarsened to respect the 2,500 px limit
+    synthetic: bool = False
+    date: str = ""
+
+
+def plan_fine_grid(grid: Grid, res_x: float, res_y: float | None = None, max_dim: int = MAX_DIM) -> tuple[Grid, float, float, bool]:
+    """Same bounds as ``grid`` at ``res_x`` x ``res_y`` metres/pixel, coarsened if it would exceed the Process API size limit."""
+    res_y = res_y or res_x
+    if res_x <= 0 or res_y <= 0:
+        raise ValueError("Resolution must be > 0 m/px.")
+    minx, miny, maxx, maxy = grid.bounds
+    wm, hm = maxx - minx, maxy - miny
+    rx, ry = max(res_x, wm / max_dim), max(res_y, hm / max_dim)
+    rx, ry = float(np.ceil(rx * 100) / 100), float(np.ceil(ry * 100) / 100)
+    fine = Grid(grid.epsg, grid.bounds, int(round(wm / rx)), int(round(hm / ry)), rx, ry)
+    return fine, rx, ry, (rx > res_x + 1e-9 or ry > res_y + 1e-9)
+
+
+def evalscript_for_bands(bands: list[str]) -> str:
+    for b in bands:
+        if b not in S2_BANDS:
+            raise ValueError(f"Unknown Sentinel-2 band {b}.")
+    quoted = ",".join(f'"{b}"' for b in bands)
+    returned = ",".join(f"s.{b}" for b in bands)
+    return (f'//VERSION=3\nfunction setup() {{\n  return {{ input: [{{ bands: [{quoted},"dataMask"] }}],\n'
+            f'    output: {{ id: "default", bands: {len(bands) + 1}, sampleType: "FLOAT32" }} }};\n}}\n'
+            f'function evaluatePixel(s) {{ return [{returned},s.dataMask]; }}\n')
+
+
+def _acq_window(scene: "Scene") -> tuple[str, str]:
+    dt = scene.meta.get("acquisition_dt")
+    if dt is not None:
+        return _time_window(dt)
+    d = pd.Timestamp(scene.date)
+    return d.isoformat(), (d + pd.Timedelta(hours=23, minutes=59, seconds=59)).isoformat()
+
+
+def build_fine_request(scene: "Scene", fine_grid: Grid, config: SHConfig, bands: list[str], upsampling: str = "BICUBIC") -> SentinelHubRequest:
+    if upsampling not in UPSAMPLING_METHODS:
+        raise ValueError(f"upsampling must be one of {UPSAMPLING_METHODS}")
+    t0, t1 = _acq_window(scene)
+    crs = CRS(fine_grid.epsg)
+    return SentinelHubRequest(
+        evalscript=evalscript_for_bands(bands),
+        input_data=[SentinelHubRequest.input_data(
+            data_collection=s2_collection(config), time_interval=(t0, t1),
+            other_args={"processing": {"upsampling": upsampling, "downsampling": "NEAREST"}})],
+        responses=[SentinelHubRequest.output_response("default", MimeType.TIFF)],
+        bbox=BBox(fine_grid.bounds, crs=crs), geometry=Geometry(scene.boundary_utm, crs=crs),
+        size=(fine_grid.width, fine_grid.height), config=config)
+
+
+def resample_mask_nearest(mask: np.ndarray, coarse: Grid, fine: Grid) -> np.ndarray:
+    """Nearest-neighbour a coarse (10 m) boolean mask onto the fine grid (works for non-integer ratios)."""
+    rows = np.clip(((np.arange(fine.height) + 0.5) * (fine.resolution_y or fine.resolution) / (coarse.resolution_y or coarse.resolution)).astype(int), 0, coarse.height - 1)
+    cols = np.clip(((np.arange(fine.width) + 0.5) * fine.resolution / coarse.resolution).astype(int), 0, coarse.width - 1)
+    return mask[np.ix_(rows, cols)]
+
+
+def fetch_s2_fine(scene: "Scene", config: SHConfig, bands: list[str], res_x: float = 1.0, res_y: float | None = None,
+                  upsampling: str = "BICUBIC") -> FineRaster:
+    """Download ``bands`` for the scene's date at ``res_x`` x ``res_y`` m/px (resampled from native resolution)."""
+    fine_grid, rx, ry, capped = plan_fine_grid(scene.grid, res_x, res_y)
+    arr = _download([build_fine_request(scene, fine_grid, config, bands, upsampling)], config, 1)[0]
+    if arr is None:
+        raise RuntimeError(f"No Sentinel-2 data returned for {scene.field_id} on {scene.date} at {rx:g} m/px.")
+    if arr.ndim != 3 or arr.shape[2] != len(bands) + 1:
+        raise ValueError(f"Unexpected response shape {arr.shape}; expected (H, W, {len(bands) + 1}).")
+    data_mask = arr[:, :, -1] > 0.5
+    out = {b: np.where(data_mask & np.isfinite(arr[:, :, i]), arr[:, :, i], np.nan).astype(np.float32) for i, b in enumerate(bands)}
+    inside = polygon_mask(scene.boundary_utm, fine_grid)
+    valid = inside & data_mask
+    clear = valid & resample_mask_nearest(scene.clear_mask | ~scene.field_mask, scene.grid, fine_grid)
+    return FineRaster(fine_grid, out, valid, clear, rx, ry, upsampling, capped, False, scene.date)
+
+
+def write_bands_geotiff(fine: FineRaster, band_names: list[str], crs: str = "UTM", nodata: float = -9999.0,
+                        extra_tags: dict | None = None) -> bytes:
+    """Multi-band 32-bit float GeoTIFF ("Analytical" download). ``crs``: "UTM" (metres) or "EPSG:4326" (WGS 84)."""
+    import rasterio
+    from rasterio.io import MemoryFile
+    g = fine.grid
+    data = np.stack([np.where(fine.valid, fine.bands[b], np.nan) for b in band_names]).astype(np.float32)
+    tags = {"source": "SYNTHETIC demo data" if fine.synthetic else "Sentinel-2 L2A via Sentinel Hub Process API",
+            "native_resolution": "B02/B03/B04/B08 10 m; B05-B07/B8A/B11/B12 20 m; B01/B09 60 m",
+            "resampling": fine.upsampling, "requested_resolution_m": f"{fine.res_x:g} x {fine.res_y:g}",
+            "note": "Resampled from native resolution: smoother, not more detailed.", "date": fine.date, **(extra_tags or {})}
+    if crs.upper().startswith("EPSG:4326") or crs.upper().startswith("WGS"):
+        minx, miny, maxx, maxy = g.bounds
+        lon_min, lat_min, lon_max, lat_max = transform_bounds(g.crs, "EPSG:4326", minx, miny, maxx, maxy)
+        lat_c = (lat_min + lat_max) / 2
+        res = (fine.res_x / (111_320 * np.cos(np.radians(lat_c))), fine.res_y / 110_574)
+        dst_t, dw, dh = calculate_default_transform(g.crs, "EPSG:4326", g.width, g.height, minx, miny, maxx, maxy, resolution=res)
+        out = np.full((len(band_names), dh, dw), np.nan, dtype=np.float32)
+        for i in range(len(band_names)):
+            reproject(data[i], out[i], src_transform=g.transform, src_crs=g.crs, dst_transform=dst_t, dst_crs="EPSG:4326",
+                      src_nodata=np.nan, dst_nodata=np.nan, resampling=Resampling.bilinear)
+        arr, transform, crs_out, h, w = out, dst_t, "EPSG:4326", dh, dw
+    else:
+        arr, transform, crs_out, h, w = data, g.transform, g.crs, g.height, g.width
+    arr = np.where(np.isfinite(arr), arr, nodata).astype(np.float32)
+    with MemoryFile() as mem:
+        with mem.open(driver="GTiff", height=h, width=w, count=len(band_names), dtype="float32", crs=crs_out, transform=transform,
+                      nodata=nodata, compress="deflate", predictor=3, tiled=False) as dst:
+            dst.write(arr)
+            for i, b in enumerate(band_names, 1):
+                dst.set_band_description(i, b)
+            dst.update_tags(**{k: str(v) for k, v in tags.items()})
+        return mem.read()

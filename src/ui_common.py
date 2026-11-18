@@ -276,3 +276,66 @@ def read_raster_to_grid(uploaded_file, grid) -> "np.ndarray":
         return dst
     finally:
         Path(path).unlink(missing_ok=True)
+
+
+# --------------------------------------------------------------------------
+# Image resolution (display / export), Copernicus-Browser style
+# --------------------------------------------------------------------------
+from .imagery import UPSAMPLING_METHODS, FineRaster, fetch_s2_fine, plan_fine_grid, write_bands_geotiff  # noqa: E402
+from .demo_scene import make_demo_fine  # noqa: E402
+from .imagery_viz import FINE_RENDER_MODES, RENDER_MODES, hd_render, natural_rgb  # noqa: E402
+
+DISPLAY_RES_OPTIONS = [1.0, 2.0, 5.0, 10.0]
+RESOLUTION_NOTE = ("Sentinel-2 is **10 m per pixel**. Choosing 1 m/px resamples those pixels onto a finer grid (what the Copernicus Browser does): "
+                   "smoother and easier to read, but no new ground detail. For genuinely finer context use the satellite basemap tabs.")
+
+
+def display_res_sidebar() -> tuple[float, str]:
+    ss = st.session_state
+    st.sidebar.header("Image resolution")
+    res = st.sidebar.selectbox("True-colour display resolution (m/px)", DISPLAY_RES_OPTIONS,
+                               index=DISPLAY_RES_OPTIONS.index(ss.get("_disp_res", 1.0)), format_func=lambda r: f"{r:g} m/px" + (" (native)" if r == 10 else ""))
+    up = st.sidebar.selectbox("Resampling", list(UPSAMPLING_METHODS), index=list(UPSAMPLING_METHODS).index(ss.get("_disp_up", "BICUBIC")),
+                              help="How native 10 m pixels are interpolated onto the finer grid. Bicubic is smoothest; nearest keeps true pixel blocks.")
+    ss["_disp_res"], ss["_disp_up"] = res, up
+    st.sidebar.caption(RESOLUTION_NOTE)
+    return res, up
+
+
+def render_mode_options(res: float) -> list[str]:
+    return list(FINE_RENDER_MODES) if res < 10 else list(RENDER_MODES)
+
+
+def get_fine(scene: Scene, demo: bool, creds: dict, bands: list[str], res_x: float, res_y: float | None, upsampling: str) -> FineRaster:
+    """Fine-resolution bands for the scene (session-cached)."""
+    cache = st.session_state.setdefault("_fine_cache", {})
+    key = (scene.field_id, scene.date, scene.synthetic, tuple(sorted(bands)), res_x, res_y or res_x, upsampling)
+    if key not in cache:
+        cache[key] = make_demo_fine(scene, bands, res_x, res_y, upsampling) if scene.synthetic else \
+            fetch_s2_fine(scene, get_config(creds), bands, res_x, res_y, upsampling)
+        while len(cache) > 3:
+            cache.pop(next(iter(cache)))
+    return cache[key]
+
+
+def render_true_colour(scene: Scene, demo: bool, creds: dict, res: float, upsampling: str, mode: str,
+                       triplet=("B04", "B03", "B02"), mask_clouds: bool = True, lo: float = 1, hi: float = 99,
+                       gamma: float = 0.85, joint: bool = True) -> dict:
+    """Natural-colour RGB at the chosen display resolution -> {img, valid, grid, scale, res, note}."""
+    if res < 10:
+        fine = get_fine(scene, demo, creds, list(triplet), res, res, upsampling)
+        rgbf = natural_rgb(fine.bands, triplet, fine.clear if mask_clouds else fine.valid, lo, hi, gamma, joint)
+        img, valid, f = hd_render(rgbf, mode if mode in FINE_RENDER_MODES else "Sharpen (recommended)", native_res_m=10.0, pixel_m=fine.res_x)
+        note = f"{fine.grid.width} x {fine.grid.height} px at {fine.res_x:g} x {fine.res_y:g} m/px ({upsampling.lower()} resampled from 10 m)"
+        if fine.capped:
+            note += " - coarsened from the requested resolution to respect the 2,500 px request limit"
+        return {"img": img, "valid": valid, "grid": fine.grid, "scale": 1, "res": fine.res_x, "note": note}
+    rgbf = natural_rgb(scene.bands, triplet, scene.clear_mask if mask_clouds else scene.field_mask, lo, hi, gamma, joint)
+    img, valid, f = hd_render(rgbf, mode if mode in RENDER_MODES else "HD x4 + sharpen")
+    return {"img": img, "valid": valid, "grid": scene.grid, "scale": f, "res": 10.0 / f,
+            "note": f"native 10 m pixels shown at x{f} (interpolated for display)"}
+
+
+def analytical_download_bytes(scene: Scene, demo: bool, creds: dict, bands: list[str], rx: float, ry: float, upsampling: str, crs: str) -> bytes:
+    fine = get_fine(scene, demo, creds, bands, rx, ry, upsampling)
+    return write_bands_geotiff(fine, bands, crs, extra_tags={"field": scene.field_id})
